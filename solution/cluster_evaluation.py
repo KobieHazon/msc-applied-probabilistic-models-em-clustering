@@ -1,102 +1,93 @@
-"""
-Utils for evaluating the clustering model's performance
-"""
+"""Evaluate clusters and export the recovered report tables."""
+
+from __future__ import annotations
+
 import csv
 from collections import Counter
-from datetime import datetime
+from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
-from typing import Collection, Iterable, List, Set, Tuple
 
-from article_dataset import ArticleUnigramInfo
-from em_cluster_runner import LanguageModelScore
+from .article_dataset import ArticleUnigramInfo
+from .em_cluster_runner import LanguageModelScore
 
-_SCORES_CSV_FIELD_NAMES = ["iteration number", "ln likelihood score", "perplexity score"]
-_CLUSTER_EVALUATION_DIRECTORY: Path = Path("cluster_evaluation")
-_EVALUATION_TIME = datetime.now()
-
-
-def export_scores_to_csv(scores: Iterable[LanguageModelScore]):
-    """
-    Exports the model's score to a csv
-    """
-
-    if not _CLUSTER_EVALUATION_DIRECTORY.is_dir():
-        _CLUSTER_EVALUATION_DIRECTORY.mkdir()
-    with open(_CLUSTER_EVALUATION_DIRECTORY / f'model_scores_{_EVALUATION_TIME.strftime("%Y-%m-%d-%H-%M-%S")}.csv',
-              'w', newline='') as scores_csv:
-        scores_writer = csv.DictWriter(scores_csv, fieldnames=_SCORES_CSV_FIELD_NAMES)
-
-        scores_writer.writeheader()
-        scores_writer.writerows([
-            {
-                _SCORES_CSV_FIELD_NAMES[0]: iteration_num,
-                _SCORES_CSV_FIELD_NAMES[1]: score.ln_likelihood,
-                _SCORES_CSV_FIELD_NAMES[2]: score.mean_word_perplexity
-            }
-            for iteration_num, score in enumerate(scores)
-        ])
+SCORES_CSV_FIELD_NAMES = (
+    "iteration number",
+    "ln likelihood score",
+    "perplexity score",
+)
 
 
-def _get_cluster_topic_confusion_matrix(
-        clusters: Collection[Set[ArticleUnigramInfo]],
-        topics: Collection[str]
-) -> Tuple[List[int], ...]:
-    """
-    Returns the cluster-topic confusion matrix
-    """
-    topic_to_column_num = {topic: topic_num for topic_num, topic in enumerate(topics)}
-    confusion_matrix: Tuple[List[int], ...] = tuple([0 for _ in range(len(topics))] for _ in range(len(clusters)))
+def export_scores_to_csv(scores: Iterable[LanguageModelScore], output_path: str | Path) -> Path:
+    """Export per-iteration likelihood and perplexity scores."""
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8", newline="") as scores_csv:
+        writer = csv.writer(scores_csv)
+        writer.writerow(SCORES_CSV_FIELD_NAMES)
+        writer.writerows(
+            (iteration, score.ln_likelihood, score.mean_word_perplexity)
+            for iteration, score in enumerate(scores)
+        )
+    return destination
+
+
+def get_cluster_topic_confusion_matrix(
+    clusters: Sequence[Collection[ArticleUnigramInfo]],
+    topics: Sequence[str],
+) -> tuple[tuple[int, ...], ...]:
+    """Return the cluster-by-topic confusion matrix."""
+    topic_to_column = {topic: index for index, topic in enumerate(topics)}
+    matrix = [[0 for _ in topics] for _ in clusters]
 
     for cluster_row, cluster in enumerate(clusters):
         for article in cluster:
             for topic in article.article_topics:
-                topic_column = topic_to_column_num[topic]
-                confusion_matrix[cluster_row][topic_column] += 1
-    return confusion_matrix
+                try:
+                    topic_column = topic_to_column[topic]
+                except KeyError as exc:
+                    raise ValueError(f"article contains unknown topic: {topic}") from exc
+                matrix[cluster_row][topic_column] += 1
+    return tuple(tuple(row) for row in matrix)
 
 
-def export_confusion_matrix_to_csv(clusters: Collection[Set[ArticleUnigramInfo]], topics: Collection[str]):
-    """
-    Exports a confusion matrix of the article's clustering to a csv
-    """
-    if not _CLUSTER_EVALUATION_DIRECTORY.is_dir():
-        _CLUSTER_EVALUATION_DIRECTORY.mkdir()
+def export_confusion_matrix_to_csv(
+    clusters: Sequence[Collection[ArticleUnigramInfo]],
+    topics: Sequence[str],
+    output_path: str | Path,
+) -> Path:
+    """Export a size-sorted cluster-by-topic confusion matrix."""
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    matrix = get_cluster_topic_confusion_matrix(clusters, topics)
+    rows = sorted(enumerate(matrix), key=lambda item: sum(item[1]), reverse=True)
 
-    confusion_matrix = _get_cluster_topic_confusion_matrix(clusters, topics)
-    confusion_matrix_csv_field_names = [r"cluster number\topic"] + [topic for topic in topics] + ["cluster size"]
-    with open(_CLUSTER_EVALUATION_DIRECTORY / f'confusion_matrix_{_EVALUATION_TIME.strftime("%Y-%m-%d-%H-%M-%S")}.csv',
-              'w', newline='') as confusion_matrix_csv:
-        confusion_matrix_writer = csv.DictWriter(confusion_matrix_csv, fieldnames=confusion_matrix_csv_field_names)
-
-        confusion_matrix_writer.writeheader()
-        confusion_matrix_writer.writerows(sorted([
-            {
-                confusion_matrix_csv_field_names[0]: cluster_number,
-                **{confusion_matrix_csv_field_names[topic_num + 1]: confusion_matrix[cluster_number][topic_num]
-                   for topic_num in range(len(topics))},
-                confusion_matrix_csv_field_names[-1]: sum(confusion_matrix[cluster_number])
-            }
-            for cluster_number, cluster_confusion in enumerate(confusion_matrix)
-        ], key=lambda row: row[confusion_matrix_csv_field_names[-1]], reverse=True))
+    with destination.open("w", encoding="utf-8", newline="") as matrix_csv:
+        writer = csv.writer(matrix_csv)
+        writer.writerow((r"cluster number\topic", *topics, "cluster size"))
+        writer.writerows((cluster_id, *counts, sum(counts)) for cluster_id, counts in rows)
+    return destination
 
 
-def _get_cluster_topic(cluster: Set[ArticleUnigramInfo]) -> str:
-    """
-    Return the topic our clustering model gave to a cluster
-    """
-    all_topics = [topic for article in cluster for topic in article.article_topics]
-    cluster_topics_counter = Counter(all_topics)
-    return cluster_topics_counter.most_common(1)[0][0]
+def _get_cluster_topic(cluster: Collection[ArticleUnigramInfo]) -> str:
+    if not cluster:
+        raise ValueError("an empty cluster has no dominant topic")
+    topic_counts = Counter(topic for article in cluster for topic in article.article_topics)
+    return topic_counts.most_common(1)[0][0]
 
 
-def get_clusters_topics_accuracy(clusters: Tuple[Set[ArticleUnigramInfo], ...]):
-    """
-    Returns the accuracy of the clustering model
-    """
+def get_clusters_topics_accuracy(
+    clusters: Sequence[Collection[ArticleUnigramInfo]],
+) -> float:
+    """Return dominant-topic assignment accuracy across nonempty clusters."""
     correct_assignments = 0
     total_assignments = 0
     for cluster in clusters:
+        if not cluster:
+            continue
         cluster_topic = _get_cluster_topic(cluster)
         correct_assignments += sum(cluster_topic in article.article_topics for article in cluster)
         total_assignments += len(cluster)
+
+    if total_assignments == 0:
+        raise ValueError("accuracy requires at least one clustered article")
     return correct_assignments / total_assignments

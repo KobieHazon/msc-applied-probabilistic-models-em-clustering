@@ -1,144 +1,130 @@
-"""
-Helper for minimizing reading from the dataset files and parsing them
-"""
+"""Parse the Reuters-derived article corpus used by the clustering exercise."""
+
+from __future__ import annotations
+
 from collections import Counter
-from dataclasses import dataclass, field
-from itertools import count
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Counter as CounterType, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import numpy.typing as npt
 
 
-@dataclass(frozen=True)
+@dataclass(eq=False)
 class ArticleUnigramInfo:
-    """
-    Dataclass for parsed article unigram information.
-    Contains the fields:
-    * ordinal_id (id by order in the dataset)
-    * text (the article's text)
-    * words_counter (counter for the article's words)
-    * total_words (the total number of words in the article)
-    * article_topics (the topics of the article according to the dataset)
-    """
+    """Unigram information and reference topics for one article."""
+
+    ordinal_id: int
     text: str
-    words_counter: CounterType[str]
+    words_counter: Counter[str]
     total_words: int
-    article_topics: Set[str]
-    ordinal_id: int = field(default_factory=count().__next__)
+    article_topics: frozenset[str]
 
-    @staticmethod
-    def from_text_header(text: str, header: str) -> 'ArticleUnigramInfo':
-        """
-        Parse the article from its text and header
-        """
-        text_words = text.split()
-        text_words_counter = Counter(text_words)
-        article_topics = set(header.strip()[1:-1].split()[2:])
-        return ArticleUnigramInfo(
+    @classmethod
+    def from_text_header(
+        cls,
+        text: str,
+        header: str,
+        ordinal_id: int,
+    ) -> ArticleUnigramInfo:
+        """Parse one article body and its supplied Reuters header."""
+        header_fields = header.strip()[1:-1].split()
+        if len(header_fields) < 3:
+            raise ValueError(f"invalid article header: {header!r}")
+
+        words_counter = Counter(text.split())
+        return cls(
+            ordinal_id=ordinal_id,
             text=text,
-            words_counter=text_words_counter,
-            total_words=sum(text_words_counter.values()),
-            article_topics=article_topics
+            words_counter=words_counter,
+            total_words=sum(words_counter.values()),
+            article_topics=frozenset(header_fields[2:]),
         )
-
-    def __hash__(self):
-        return hash(self.text)
 
 
 class ArticleDataset:
-    """
-    Helper class for reading and parsing the given dataset files
-    """
+    """Load articles and produce the dense frequency matrix used by EM."""
 
-    def __init__(self, dataset_file_path: Path):
-        """
-        :param dataset_file_path: file path for the dataset
-        """
+    def __init__(self, dataset_file_path: str | Path):
+        self._dataset_file_path = Path(dataset_file_path)
         self._dataset_file_processed = False
-        self._dataset_file_path = dataset_file_path
-        self._dataset_file = open(dataset_file_path, "r")
+        self._word_to_id: dict[str, int] = {}
+        self._articles_info: tuple[ArticleUnigramInfo, ...] | None = None
+        self._words_counter: Counter[str] = Counter()
 
-        self._word_to_id: Dict[str, int] = {}
-        self._articles_info: Optional[Tuple[ArticleUnigramInfo, ...]] = None
-        self._words_counter: Counter = Counter()
-
-    def _process_dataset_file(self):
-        """
-        Iterator for the words in the articles as presented in the dataset file
-        :return: word in the article_info
-        """
+    def _process_dataset_file(self) -> None:
         if self._dataset_file_processed:
             return
-        articles_info: List[ArticleUnigramInfo] = []
-        article_header = ""
 
-        self._dataset_file.seek(0)  # start from the beginning of the file
-        for line_num, line in enumerate(self._dataset_file):
-            if line_num % 4 == 0:  # article header
-                article_header = line
-            elif line_num % 4 == 2:  # article content
-                articles_info.append(ArticleUnigramInfo.from_text_header(line, article_header))
+        with self._dataset_file_path.open(encoding="utf-8") as dataset_file:
+            lines = [line.strip() for line in dataset_file if line.strip()]
 
-        self._words_counter: CounterType[str] = Counter()
-        for article_info in articles_info:
-            self._words_counter.update(article_info.words_counter)
-        for word_id, word in enumerate(self._words_counter):
-            self._word_to_id[word] = word_id
-        self._articles_info = tuple(articles_info)
+        if len(lines) % 2:
+            raise ValueError("dataset must contain a header and body for every article")
+
+        articles = tuple(
+            ArticleUnigramInfo.from_text_header(
+                header=lines[index],
+                text=lines[index + 1],
+                ordinal_id=index // 2,
+            )
+            for index in range(0, len(lines), 2)
+        )
+        if not articles:
+            raise ValueError("dataset contains no articles")
+
+        self._words_counter = Counter()
+        for article in articles:
+            self._words_counter.update(article.words_counter)
+
+        self._articles_info = articles
+        self._rebuild_word_ids()
         self._dataset_file_processed = True
 
-    def remove_rare_words(self, count_threshold: int):
-        """
-        Removes rare words from the dataset, by count threshold
-        """
+    def _rebuild_word_ids(self) -> None:
+        self._word_to_id = {word: word_id for word_id, word in enumerate(self._words_counter)}
 
-        def _remove_word_from_articles(to_remove: str):
-            for article_info in self._articles_info:
-                if to_remove in article_info.words_counter:
-                    article_info.words_counter.pop(to_remove)
+    def remove_rare_words(self, count_threshold: int) -> None:
+        """Remove words whose global count is at or below the threshold."""
+        if count_threshold < 0:
+            raise ValueError("rare-word threshold cannot be negative")
+        self._process_dataset_file()
+        assert self._articles_info is not None
 
-        for word, word_cnt in self.words_counter.items():
-            if word_cnt <= count_threshold:
-                _remove_word_from_articles(word)
-                self._words_counter.pop(word)
+        rare_words = {
+            word for word, count in self._words_counter.items() if count <= count_threshold
+        }
+        for article in self._articles_info:
+            for word in rare_words & article.words_counter.keys():
+                del article.words_counter[word]
+            article.total_words = sum(article.words_counter.values())
 
-        self._word_to_id = {}
-        for word_id, word in enumerate(self._words_counter):
-            self._word_to_id[word] = word_id
+        for word in rare_words:
+            del self._words_counter[word]
+        self._rebuild_word_ids()
 
-    def to_word_frequency_matrix(self) -> npt.NDArray[np.integer]:
-        """
-        Exports the dataset as word to frequency matrix
-        """
-        if not self._dataset_file_processed:
-            self._process_dataset_file()
+    def to_word_frequency_matrix(self) -> npt.NDArray[np.float64]:
+        """Return an article-by-word frequency matrix."""
+        self._process_dataset_file()
+        assert self._articles_info is not None
 
-        word_frequency_matrix = np.zeros((len(self._articles_info), len(self._words_counter)))
-        for article_info in self._articles_info:
-            for word in self._words_counter:
-                word_frequency_matrix[article_info.ordinal_id, self._word_to_id[word]] = (
-                    article_info.words_counter[word]
-                )
-        return word_frequency_matrix
+        matrix = np.zeros((len(self._articles_info), len(self._words_counter)), dtype=np.float64)
+        for article in self._articles_info:
+            for word, count in article.words_counter.items():
+                word_id = self._word_to_id.get(word)
+                if word_id is not None:
+                    matrix[article.ordinal_id, word_id] = count
+        return matrix
 
     @property
-    def articles_info(self) -> Tuple[ArticleUnigramInfo, ...]:
-        """
-        Information on all the articles in the dataset
-        """
-        if not self._dataset_file_processed:
-            self._process_dataset_file()
-
+    def articles_info(self) -> tuple[ArticleUnigramInfo, ...]:
+        """Information for every parsed article in source order."""
+        self._process_dataset_file()
+        assert self._articles_info is not None
         return self._articles_info
 
     @property
-    def words_counter(self) -> Counter:
-        """
-        Global words counter for the dataset
-        """
-        if not self._dataset_file_processed:
-            self._process_dataset_file()
-
+    def words_counter(self) -> Counter[str]:
+        """A copy of the global corpus word counter."""
+        self._process_dataset_file()
         return self._words_counter.copy()
