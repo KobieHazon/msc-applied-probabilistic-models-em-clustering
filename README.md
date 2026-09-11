@@ -59,6 +59,4 @@ The integration check compares all 33 likelihood and perplexity records, the fin
 
 ## Implementation notes
 
-The report retains the author's name while removing the student ID, submission date, identifying filename, and timestamp metadata. All four rendered pages were reviewed after sanitization.
-
 The maintained version adds deterministic output paths, independent article numbering across dataset instances, bounded EM execution, faster frequency-matrix construction, packaging, tests, and documentation.
