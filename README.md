@@ -20,7 +20,7 @@ uv sync --dev
 
 ## Usage
 
-Run the complete recovered experiment:
+Run the complete experiment:
 
 ```bash
 uv run apm-em-cluster data/develop.txt data/topics.txt
@@ -56,7 +56,3 @@ The integration check compares all 33 likelihood and perplexity records, the fin
 - `results/`: canonical score and confusion-matrix CSVs reproduced from the solution
 - `report.pdf`: authored analysis, plots, histograms, and reported conclusions
 - `tests/`: focused tests and the opt-in full-corpus regression
-
-## Implementation notes
-
-The maintained version adds deterministic output paths, independent article numbering across dataset instances, bounded EM execution, faster frequency-matrix construction, packaging, tests, and documentation.

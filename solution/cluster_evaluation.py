@@ -1,4 +1,4 @@
-"""Evaluate clusters and export the recovered report tables."""
+"""Evaluate clusters and export the report tables."""
 
 from __future__ import annotations
 
